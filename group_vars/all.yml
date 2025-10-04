@@ -1,0 +1,42 @@
+---
+# Harbor Configuration Variables
+
+# Harbor版本
+harbor_version: "v2.14.0"
+harbor_installer_url: "https://github.com/goharbor/harbor/releases/download/{{ harbor_version }}/harbor-offline-installer-{{ harbor_version }}.tgz"
+
+# Harbor安装目录
+harbor_install_dir: "/opt/harbor"
+harbor_data_dir: "/data/harbor"
+
+# Harbor域名配置
+harbor_hostname: "harbor.example.com"  # 修改为你的实际域名
+
+# Harbor管理员密码
+harbor_admin_password: "Harbor12345"  # 建议修改为强密码
+
+# Cloudflare配置
+cloudflare_email: "your-email@example.com"  # Cloudflare账号邮箱
+cloudflare_api_key: "your-cloudflare-api-key-or-token"  # Cloudflare Global API Key 或 API Token
+
+# SSL证书配置
+ssl_cert_dir: "/opt/harbor/certs"
+ssl_cert_path: "{{ ssl_cert_dir }}/{{ harbor_hostname }}.crt"
+ssl_key_path: "{{ ssl_cert_dir }}/{{ harbor_hostname }}.key"
+
+# Docker配置
+docker_compose_version: "2.40.0"
+
+# Harbor端口配置
+harbor_http_port: 80
+harbor_https_port: 443
+
+# Harbor数据库配置
+harbor_db_password: "change-this-password"  # 建议修改
+harbor_db_max_idle_conns: 100
+harbor_db_max_open_conns: 900
+
+# 日志配置
+harbor_log_level: "info"
+harbor_log_rotate_count: 50
+harbor_log_rotate_size: "200M"

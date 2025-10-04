@@ -1,0 +1,374 @@
+---
+- name: Deploy Harbor with Docker Compose and Cloudflare SSL
+  hosts: harbor
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - "../../group_vars/harbor/all.yml"
+
+  vars:
+    acme_home: "{{ ansible_env.HOME }}/.acme.sh"
+    acme_script_path: "{{ acme_home }}/acme.sh"
+
+  handlers:
+    - name: Restart Harbor proxy
+      ansible.builtin.command: docker-compose restart proxy
+      args:
+        chdir: "{{ harbor_install_dir }}/harbor"
+      changed_when: true
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - python3-pip
+          - socat
+          - cron
+          - git
+        state: present
+
+    - name: Add Docker GPG key
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Install Docker
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+        update_cache: true
+
+    - name: Start and enable Docker service
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Debug docker_compose_version
+      ansible.builtin.debug:
+        msg: "Docker Compose version: {{ docker_compose_version | default('UNDEFINED') }}"
+
+    - name: Install Docker Compose
+      ansible.builtin.get_url:
+        url: "https://github.com/docker/compose/releases/download/v{{ docker_compose_version }}/docker-compose-linux-x86_64"
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+
+    - name: Verify Docker Compose installation
+      ansible.builtin.command: docker-compose --version
+      register: docker_compose_version_output
+      changed_when: false
+
+    - name: Display Docker Compose version
+      ansible.builtin.debug:
+        msg: "{{ docker_compose_version_output.stdout }}"
+
+    - name: Create Harbor directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ harbor_install_dir }}"
+        - "{{ harbor_data_dir }}"
+        - "{{ ssl_cert_dir }}"
+
+    - name: Check if acme.sh is already installed
+      ansible.builtin.stat:
+        path: "{{ acme_script_path }}"
+      register: acme_installed
+
+    - name: Clone acme.sh repository
+      ansible.builtin.git:
+        repo: https://github.com/acmesh-official/acme.sh.git
+        dest: /tmp/acme.sh-repo
+        version: master
+        depth: 1
+      when: not acme_installed.stat.exists
+
+    - name: Install acme.sh from git
+      ansible.builtin.command:
+        cmd: ./acme.sh --install --home {{ acme_home }} --email {{ cloudflare_email }}
+        chdir: /tmp/acme.sh-repo
+        creates: "{{ acme_script_path }}"
+      when: not acme_installed.stat.exists
+      register: acme_install_result
+
+    - name: Clean up acme.sh repository
+      ansible.builtin.file:
+        path: /tmp/acme.sh-repo
+        state: absent
+      when: acme_install_result is changed
+
+    - name: Verify acme.sh installation
+      ansible.builtin.stat:
+        path: "{{ acme_script_path }}"
+      register: acme_verify
+
+    - name: Fail if acme.sh not installed
+      ansible.builtin.fail:
+        msg: "acme.sh installation failed - file not found at {{ acme_script_path }}"
+      when: not acme_verify.stat.exists
+
+    - name: Set Cloudflare credentials for acme.sh
+      ansible.builtin.lineinfile:
+        path: "{{ acme_home }}/account.conf"
+        regexp: "^{{ item.key }}="
+        line: "{{ item.key }}='{{ item.value }}'"
+        create: true
+        mode: '0600'
+      loop:
+        - { key: 'CF_Email', value: "{{ cloudflare_email }}" }
+        - { key: 'CF_Key', value: "{{ cloudflare_api_key }}" }
+      no_log: true
+
+    - name: Issue SSL certificate with acme.sh
+      ansible.builtin.command: >
+        {{ acme_script_path }} --issue
+        --dns dns_cf
+        -d {{ harbor_hostname }}
+        --server letsencrypt
+      environment:
+        CF_Email: "{{ cloudflare_email }}"
+        CF_Key: "{{ cloudflare_api_key }}"
+      register: acme_issue
+      changed_when:
+        - acme_issue.rc == 0
+        - "'Cert success' in acme_issue.stdout or 'already issued' in acme_issue.stdout"
+      failed_when:
+        - acme_issue.rc != 0
+        - "'Cert success' not in acme_issue.stdout"
+        - "'already issued' not in acme_issue.stdout"
+        - "'Domains not changed' not in acme_issue.stdout"
+        - "'Skipping' not in acme_issue.stdout"
+
+    - name: Check if certificate is installed in Harbor directory
+      ansible.builtin.stat:
+        path: "{{ ssl_cert_path }}"
+      register: harbor_cert_installed
+
+    - name: Install SSL certificate to Harbor directory
+      ansible.builtin.command: >
+        {{ acme_script_path }} --install-cert
+        -d {{ harbor_hostname }}
+        --cert-file {{ ssl_cert_path }}
+        --key-file {{ ssl_key_path }}
+        --fullchain-file {{ ssl_cert_dir }}/fullchain.crt
+      when: not harbor_cert_installed.stat.exists or acme_issue is changed
+      register: cert_install_result
+      changed_when: cert_install_result.rc == 0
+      notify: Restart Harbor proxy
+
+    - name: Set proper permissions on SSL files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: '0644'
+      loop:
+        - "{{ ssl_cert_path }}"
+        - "{{ ssl_cert_dir }}/fullchain.crt"
+
+    - name: Set proper permissions on SSL key
+      ansible.builtin.file:
+        path: "{{ ssl_key_path }}"
+        mode: '0600'
+
+    - name: Check if Harbor is already downloaded
+      ansible.builtin.stat:
+        path: "{{ harbor_install_dir }}/harbor"
+      register: harbor_downloaded
+
+    - name: Download Harbor installer
+      ansible.builtin.get_url:
+        url: "{{ harbor_installer_url }}"
+        dest: "/tmp/harbor-installer.tgz"
+        mode: '0644'
+      when: not harbor_downloaded.stat.exists
+
+    - name: Extract Harbor installer
+      ansible.builtin.unarchive:
+        src: "/tmp/harbor-installer.tgz"
+        dest: "{{ harbor_install_dir }}"
+        remote_src: true
+      when: not harbor_downloaded.stat.exists
+
+    - name: Copy Harbor configuration template
+      ansible.builtin.copy:
+        src: "{{ harbor_install_dir }}/harbor/harbor.yml.tmpl"
+        dest: "{{ harbor_install_dir }}/harbor/harbor.yml"
+        remote_src: true
+        mode: '0644'
+        force: false
+
+    - name: Configure Harbor hostname
+      ansible.builtin.lineinfile:
+        path: "{{ harbor_install_dir }}/harbor/harbor.yml"
+        regexp: '^hostname:'
+        line: "hostname: {{ harbor_hostname }}"
+
+    - name: Configure Harbor HTTP port
+      ansible.builtin.lineinfile:
+        path: "{{ harbor_install_dir }}/harbor/harbor.yml"
+        regexp: '^  port: 80'
+        line: "  port: {{ harbor_http_port }}"
+
+    - name: Configure Harbor HTTPS certificate
+      ansible.builtin.lineinfile:
+        path: "{{ harbor_install_dir }}/harbor/harbor.yml"
+        regexp: '^  certificate:'
+        line: "  certificate: {{ ssl_cert_path }}"
+
+    - name: Configure Harbor HTTPS private key
+      ansible.builtin.lineinfile:
+        path: "{{ harbor_install_dir }}/harbor/harbor.yml"
+        regexp: '^  private_key:'
+        line: "  private_key: {{ ssl_key_path }}"
+
+    - name: Configure Harbor HTTPS port
+      ansible.builtin.lineinfile:
+        path: "{{ harbor_install_dir }}/harbor/harbor.yml"
+        regexp: '^  port: 443'
+        line: "  port: {{ harbor_https_port }}"
+
+    - name: Configure Harbor admin password
+      ansible.builtin.lineinfile:
+        path: "{{ harbor_install_dir }}/harbor/harbor.yml"
+        regexp: '^harbor_admin_password:'
+        line: "harbor_admin_password: {{ harbor_admin_password }}"
+      no_log: true
+
+    - name: Configure Harbor data volume
+      ansible.builtin.lineinfile:
+        path: "{{ harbor_install_dir }}/harbor/harbor.yml"
+        regexp: '^data_volume:'
+        line: "data_volume: {{ harbor_data_dir }}"
+
+    - name: Configure Harbor database password
+      ansible.builtin.lineinfile:
+        path: "{{ harbor_install_dir }}/harbor/harbor.yml"
+        regexp: '^  password:'
+        line: "  password: {{ harbor_db_password }}"
+      no_log: true
+
+    - name: Configure Harbor database max idle connections
+      ansible.builtin.lineinfile:
+        path: "{{ harbor_install_dir }}/harbor/harbor.yml"
+        regexp: '^  max_idle_conns:'
+        line: "  max_idle_conns: {{ harbor_db_max_idle_conns }}"
+
+    - name: Configure Harbor database max open connections
+      ansible.builtin.lineinfile:
+        path: "{{ harbor_install_dir }}/harbor/harbor.yml"
+        regexp: '^  max_open_conns:'
+        line: "  max_open_conns: {{ harbor_db_max_open_conns }}"
+
+    - name: Configure Harbor log level
+      ansible.builtin.lineinfile:
+        path: "{{ harbor_install_dir }}/harbor/harbor.yml"
+        regexp: '^  level:'
+        line: "  level: {{ harbor_log_level }}"
+
+    - name: Configure Harbor log rotate count
+      ansible.builtin.lineinfile:
+        path: "{{ harbor_install_dir }}/harbor/harbor.yml"
+        regexp: '^  rotate_count:'
+        line: "  rotate_count: {{ harbor_log_rotate_count }}"
+
+    - name: Configure Harbor log rotate size
+      ansible.builtin.lineinfile:
+        path: "{{ harbor_install_dir }}/harbor/harbor.yml"
+        regexp: '^  rotate_size:'
+        line: "  rotate_size: {{ harbor_log_rotate_size }}"
+
+    - name: Run Harbor installer script
+      ansible.builtin.command: >
+        {{ harbor_install_dir }}/harbor/install.sh
+        --with-trivy
+      args:
+        chdir: "{{ harbor_install_dir }}/harbor"
+        creates: "{{ harbor_install_dir }}/harbor/docker-compose.yml"
+      environment:
+        TERM: xterm
+      register: harbor_install_output
+
+    - name: Display Harbor installation output
+      ansible.builtin.debug:
+        msg: "{{ harbor_install_output.stdout_lines | default([]) }}"
+      when:
+        - harbor_install_output is defined
+        - harbor_install_output.stdout_lines is defined
+        - harbor_install_output.stdout_lines | length > 0
+
+    - name: Check if Harbor is running
+      ansible.builtin.command: docker-compose ps
+      args:
+        chdir: "{{ harbor_install_dir }}/harbor"
+      register: harbor_status
+      changed_when: false
+
+    - name: Display Harbor status
+      ansible.builtin.debug:
+        msg: "{{ harbor_status.stdout_lines }}"
+
+    - name: Create certificate renewal script
+      ansible.builtin.copy:
+        dest: /usr/local/bin/renew-harbor-cert.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          set -e
+          {{ acme_script_path }} --renew -d {{ harbor_hostname }} --force
+          {{ acme_script_path }} --install-cert -d {{ harbor_hostname }} \
+            --cert-file {{ ssl_cert_path }} \
+            --key-file {{ ssl_key_path }} \
+            --fullchain-file {{ ssl_cert_dir }}/fullchain.crt
+          cd {{ harbor_install_dir }}/harbor
+          docker-compose restart proxy
+
+    - name: Setup acme.sh certificate auto-renewal
+      ansible.builtin.cron:
+        name: "Renew Harbor SSL certificate"
+        minute: "0"
+        hour: "2"
+        job: "/usr/local/bin/renew-harbor-cert.sh >> /var/log/harbor-cert-renewal.log 2>&1"
+
+    - name: Display access information
+      ansible.builtin.debug:
+        msg:
+          - "================================================"
+          - "Harbor has been deployed successfully!"
+          - "================================================"
+          - "Harbor URL: https://{{ harbor_hostname }}"
+          - "Admin Username: admin"
+          - "Admin Password: {{ harbor_admin_password }}"
+          - "================================================"
+          - "SSL Certificate: {{ ssl_cert_path }}"
+          - "SSL Key: {{ ssl_key_path }}"
+          - "================================================"
+          - "Harbor Install Directory: {{ harbor_install_dir }}/harbor"
+          - "Harbor Data Directory: {{ harbor_data_dir }}"
+          - "================================================"
+          - "To manage Harbor:"
+          - "  cd {{ harbor_install_dir }}/harbor"
+          - "  docker-compose stop"
+          - "  docker-compose start"
+          - "  docker-compose restart"
+          - "================================================"

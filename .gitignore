@@ -1,0 +1,27 @@
+# Ansible
+*.retry
+*.log
+
+# Inventory files (may contain sensitive data)
+inventory
+hosts.ini
+
+# Variables with secrets
+group_vars/secrets.yml
+**/vault.yml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+.ansible/
