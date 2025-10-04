@@ -234,7 +234,7 @@
       ansible.builtin.lineinfile:
         path: "{{ harbor_install_dir }}/harbor/harbor.yml"
         regexp: '^  certificate:'
-        line: "  certificate: {{ ssl_cert_path }}"
+        line: "  certificate: {{ ssl_cert_dir }}/fullchain.crt"
 
     - name: Configure Harbor HTTPS private key
       ansible.builtin.lineinfile:
