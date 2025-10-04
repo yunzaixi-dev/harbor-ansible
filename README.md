@@ -49,7 +49,29 @@ Edit `inventory` and add your Harbor server:
 harbor1 ansible_host=YOUR_SERVER_IP ansible_user=root
 ```
 
-### 3. Configure variables
+### 3. Configure DNS (Cloudflare)
+
+**Important: Add DNS record BEFORE running the playbook**
+
+1. Log in to Cloudflare Dashboard
+2. Select your domain
+3. Go to **DNS** > **Records**
+4. Add an **A** record:
+   - **Type**: A
+   - **Name**: harbor (or your subdomain)
+   - **IPv4 address**: Your server's public IP
+   - **Proxy status**: DNS only (grey cloud, not proxied)
+   - **TTL**: Auto
+
+Example:
+```
+Type: A
+Name: harbor
+Content: 203.0.113.100
+Proxy: DNS only
+```
+
+### 4. Configure variables
 
 Edit `group_vars/all.yml` and update:
 
@@ -60,13 +82,13 @@ Edit `group_vars/all.yml` and update:
 - `harbor_db_password`: Database password
 - `docker_compose_version`: Docker Compose version (optional)
 
-### 4. Run the playbook
+### 5. Run the playbook
 
 ```bash
 ansible-playbook -i inventory playbooks/deploy.yml
 ```
 
-### 5. Access Harbor
+### 6. Access Harbor
 
 After deployment completes, access Harbor at:
 
